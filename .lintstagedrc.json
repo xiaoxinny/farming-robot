@@ -1,0 +1,13 @@
+{
+  "packages/frontend/**/*.{ts,tsx,js,jsx,cjs}": [
+    "prettier --write",
+    "eslint --fix --config packages/frontend/eslint.config.js"
+  ],
+  "packages/frontend/**/*.{json,yml,yaml,css}": [
+    "prettier --write"
+  ],
+  "packages/backend/**/*.py": [
+    "uvx ruff check --fix",
+    "uvx ruff format"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "agritech-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgriTech Platform — farm monitoring and management",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:frontend": "npm run dev --workspace=packages/frontend",
+    "dev:backend": "echo 'Use: cd packages/backend && uvicorn app.main:app --reload'",
+    "lint:frontend": "npm --prefix packages/frontend run lint",
+    "lint:frontend:check": "npm --prefix packages/frontend run lint:check",
+    "format:frontend": "npm --prefix packages/frontend run format",
+    "format:frontend:check": "npm --prefix packages/frontend run format:check",
+    "lint:backend": "uvx ruff check packages/backend",
+    "lint:backend:fix": "uvx ruff check --fix packages/backend",
+    "format:backend": "uvx ruff format packages/backend",
+    "format:backend:check": "uvx ruff format --check packages/backend",
+    "lint": "npm run lint:frontend && npm run lint:backend",
+    "format": "npm run format:frontend && npm run format:backend",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0"
+  }
+}
