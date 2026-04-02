@@ -10,12 +10,18 @@ import {
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, SESSION_EXPIRED_EVENT } from "@/lib/api";
+import {
+  generateCodeVerifier,
+  generateCodeChallenge,
+  generateState,
+  buildAuthorizeUrl,
+} from "@/lib/auth";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type AuthStatus = "unauthenticated" | "mfa_pending" | "authenticated";
+export type AuthStatus = "unauthenticated" | "authenticated";
 
 export interface User {
   id: string;
@@ -31,11 +37,9 @@ interface AuthState {
 interface AuthContextValue extends AuthState {
   /** True while the initial token-refresh check is in flight. */
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  verifyMfa: (code: string) => Promise<void>;
+  loginWithRedirect: () => Promise<void>;
+  handleCallback: (code: string, codeVerifier: string) => Promise<void>;
   logout: () => Promise<void>;
-  loginWithOAuth: (provider: string) => Promise<void>;
-  loginPasswordless: (email: string) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +83,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     retry: false,
     refetchOnWindowFocus: false,
-    // Stale immediately — we only need the initial check
     staleTime: Infinity,
   });
 
@@ -97,59 +100,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [clearAuth]);
 
   // ---- Auth methods ----
-  const login = useCallback(async (email: string, password: string) => {
-    const data = await api.post<{ mfa_required: boolean; user?: User }>(
-      "/auth/login",
-      { email, password },
-    );
-    if (data.mfa_required) {
-      setAuthState({ status: "mfa_pending", user: null });
-    } else if (data.user) {
-      setAuthState({ status: "authenticated", user: data.user });
-    }
+  const loginWithRedirect = useCallback(async () => {
+    const verifier = generateCodeVerifier();
+    const challenge = await generateCodeChallenge(verifier);
+    const state = generateState();
+
+    sessionStorage.setItem("pkce_code_verifier", verifier);
+    sessionStorage.setItem("oauth_state", state);
+
+    window.location.href = buildAuthorizeUrl(challenge, state);
   }, []);
 
-  const verifyMfa = useCallback(async (code: string) => {
-    const data = await api.post<{ user: User }>("/auth/mfa/verify", { code });
-    setAuthState({ status: "authenticated", user: data.user });
-  }, []);
+  const handleCallback = useCallback(
+    async (code: string, codeVerifier: string) => {
+      const data = await api.post<{ user: User }>("/auth/callback", {
+        code,
+        code_verifier: codeVerifier,
+      });
+      setAuthState({ status: "authenticated", user: data.user });
+    },
+    [],
+  );
 
   const logout = useCallback(async () => {
-    await api.post("/auth/logout");
-    clearAuth();
-  }, [clearAuth]);
-
-  const loginWithOAuth = useCallback(async (provider: string) => {
-    // Redirect to backend OAuth initiation endpoint
-    window.location.href = `${import.meta.env.VITE_API_URL ?? "http://localhost:8000"}/auth/oauth/${provider}`;
-  }, []);
-
-  const loginPasswordless = useCallback(async (email: string) => {
-    await api.post("/auth/passwordless", { email });
-    // After requesting the magic link / OTP the user stays unauthenticated
-    // until they complete the flow via a callback URL.
-  }, []);
+    const data = await api.post<{ logout_url: string }>("/auth/logout");
+    setAuthState({ status: "unauthenticated", user: null });
+    queryClient.clear();
+    window.location.href = data.logout_url;
+  }, [queryClient]);
 
   // ---- Memoised context value ----
   const value = useMemo<AuthContextValue>(
     () => ({
       ...authState,
       isLoading,
-      login,
-      verifyMfa,
+      loginWithRedirect,
+      handleCallback,
       logout,
-      loginWithOAuth,
-      loginPasswordless,
     }),
-    [
-      authState,
-      isLoading,
-      login,
-      verifyMfa,
-      logout,
-      loginWithOAuth,
-      loginPasswordless,
-    ],
+    [authState, isLoading, loginWithRedirect, handleCallback, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

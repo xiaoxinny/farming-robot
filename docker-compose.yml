@@ -5,6 +5,9 @@ services:
       dockerfile: packages/frontend/Dockerfile
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_COGNITO_DOMAIN: ${VITE_COGNITO_DOMAIN}
+        VITE_COGNITO_CLIENT_ID: ${VITE_COGNITO_CLIENT_ID}
+        VITE_COGNITO_REDIRECT_URI: ${VITE_COGNITO_REDIRECT_URI}
     restart: unless-stopped
     depends_on:
       backend:
@@ -26,6 +29,9 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}
       - COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}
+      - COGNITO_DOMAIN=${COGNITO_DOMAIN}
+      - COGNITO_REDIRECT_URI=${COGNITO_REDIRECT_URI}
+      - COGNITO_CLIENT_SECRET=${COGNITO_CLIENT_SECRET:-}
       - AWS_REGION=${AWS_REGION:-ap-southeast-1}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
