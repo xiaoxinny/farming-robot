@@ -1,16 +1,22 @@
-"""Authentication endpoints — thin proxy to AWS Cognito."""
+"""Authentication endpoints — OIDC Authorization Code Flow with Cognito."""
 
 from __future__ import annotations
 
 import logging
+import re
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, EmailStr
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
+from app.core.deps import get_current_user, get_settings
 from app.core.security import (
-    AccountLockedError,
-    CognitoClient,
-    MfaVerificationError,
+    TokenExchangeError,
+    exchange_code_for_tokens,
+    parse_id_token_claims,
+    refresh_tokens,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,34 +28,31 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ---------------------------------------------------------------------------
 
 
-class LoginRequest(BaseModel):
-    """Payload for the login endpoint."""
+class CallbackRequest(BaseModel):
+    """POST /api/auth/callback request body."""
 
-    email: EmailStr
-    password: str
-
-
-class MfaVerifyRequest(BaseModel):
-    """Payload for the MFA verification endpoint."""
-
-    session: str
     code: str
-    username: str
+    code_verifier: str
 
 
-class AuthTokenResponse(BaseModel):
-    """Returned when authentication completes successfully."""
+class UserProfile(BaseModel):
+    """User profile extracted from Cognito ID token."""
 
-    message: str = "authenticated"
+    id: str
+    email: str
+    name: str | None = None
 
 
-class MfaChallengeResponse(BaseModel):
-    """Returned when MFA verification is required."""
+class AuthResponse(BaseModel):
+    """Response containing user profile after successful auth."""
 
-    mfa_required: bool = True
-    session: str
-    challenge: str
-    username: str
+    user: UserProfile
+
+
+class LogoutResponse(BaseModel):
+    """Response from logout endpoint."""
+
+    logout_url: str
 
 
 class MessageResponse(BaseModel):
@@ -71,6 +74,18 @@ _COOKIE_SETTINGS: dict = {
 ACCESS_TOKEN_COOKIE = "access_token"
 REFRESH_TOKEN_COOKIE = "refresh_token"
 
+# JWTs are three base64url-encoded segments separated by dots — no whitespace
+# or control characters.  Validating before writing to a cookie header prevents
+# injection if an upstream response were unexpectedly malformed.
+_JWT_RE = re.compile(r"^[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]*$")
+
+
+def _safe_token(value: str, name: str) -> str:
+    """Raise ValueError if *value* is not a well-formed JWT."""
+    if not _JWT_RE.match(value):
+        raise ValueError(f"Unexpected format for {name}")
+    return value
+
 
 def _set_auth_cookies(response: Response, tokens: dict) -> None:
     """Set httpOnly auth cookies on the response."""
@@ -78,15 +93,15 @@ def _set_auth_cookies(response: Response, tokens: dict) -> None:
 
     response.set_cookie(
         key=ACCESS_TOKEN_COOKIE,
-        value=tokens["access_token"],
+        value=_safe_token(tokens["access_token"], ACCESS_TOKEN_COOKIE),
         max_age=max_age,
         **_COOKIE_SETTINGS,
     )
     if tokens.get("refresh_token"):
         response.set_cookie(
             key=REFRESH_TOKEN_COOKIE,
-            value=tokens["refresh_token"],
-            max_age=30 * 24 * 3600,  # 30 days
+            value=_safe_token(tokens["refresh_token"], REFRESH_TOKEN_COOKIE),
+            max_age=2592000,  # 30 days
             **_COOKIE_SETTINGS,
         )
 
@@ -102,82 +117,110 @@ def _clear_auth_cookies(response: Response) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/login", response_model=AuthTokenResponse | MfaChallengeResponse)
-async def login(body: LoginRequest, response: Response) -> AuthTokenResponse | MfaChallengeResponse:
-    """Authenticate with email and password.
+@router.post("/callback", response_model=AuthResponse)
+async def callback(body: CallbackRequest, response: Response) -> AuthResponse:
+    """Exchange an authorization code for tokens and set auth cookies.
 
-    Returns an MFA challenge when the user pool requires it, otherwise
-    sets httpOnly auth cookies and returns a success message.
+    Accepts the authorization code and PKCE code_verifier from the frontend,
+    exchanges them at the Cognito token endpoint, validates the ID token,
+    sets httpOnly cookies, and returns the user profile.
     """
-    client = CognitoClient()
     try:
-        result = client.authenticate(body.email, body.password)
-    except Exception as exc:
-        logger.exception("Login failed for %s", body.email)
-        raise HTTPException(status_code=401, detail="Invalid credentials") from exc
-
-    if result.get("mfa_required"):
-        return MfaChallengeResponse(
-            session=result["session"],
-            challenge=result["challenge"],
-            username=result["username"],
-        )
-
-    _set_auth_cookies(response, result["tokens"])
-    return AuthTokenResponse()
-
-
-@router.post("/logout", response_model=MessageResponse)
-async def logout(response: Response) -> MessageResponse:
-    """Clear authentication cookies."""
-    _clear_auth_cookies(response)
-    return MessageResponse(message="logged out")
-
-
-@router.post("/mfa/verify", response_model=AuthTokenResponse)
-async def mfa_verify(body: MfaVerifyRequest, response: Response) -> AuthTokenResponse:
-    """Verify an MFA code and complete authentication.
-
-    On success, sets httpOnly auth cookies.
-    After 3 consecutive failures the account is locked.
-    """
-    client = CognitoClient()
-    try:
-        result = client.verify_mfa(body.session, body.code, body.username)
-    except AccountLockedError as exc:
-        raise HTTPException(
-            status_code=403,
-            detail="Account locked after too many failed MFA attempts. Please contact support.",
-        ) from exc
-    except MfaVerificationError as exc:
+        tokens = await exchange_code_for_tokens(body.code, body.code_verifier)
+    except TokenExchangeError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except httpx.HTTPError as exc:
+        logger.exception("Cognito token endpoint unreachable")
+        raise HTTPException(
+            status_code=502,
+            detail="Authentication service unavailable",
+        ) from exc
+
+    try:
+        profile = parse_id_token_claims(tokens["id_token"])
     except Exception as exc:
-        logger.exception("MFA verification error for %s", body.username)
-        raise HTTPException(status_code=401, detail="MFA verification failed") from exc
+        logger.exception("ID token validation failed")
+        raise HTTPException(status_code=401, detail="Invalid ID token") from exc
 
-    _set_auth_cookies(response, result["tokens"])
-    return AuthTokenResponse()
+    _set_auth_cookies(response, tokens)
+
+    return AuthResponse(
+        user=UserProfile(
+            id=profile["id"],
+            email=profile["email"],
+            name=profile.get("name"),
+        )
+    )
 
 
-@router.post("/token/refresh", response_model=AuthTokenResponse)
-async def token_refresh(request: Request, response: Response) -> AuthTokenResponse:
+@router.post("/token/refresh", response_model=AuthResponse)
+async def token_refresh(request: Request, response: Response) -> AuthResponse:
     """Refresh the access token using the refresh token cookie."""
     refresh_tok = request.cookies.get(REFRESH_TOKEN_COOKIE)
     if not refresh_tok:
         raise HTTPException(status_code=401, detail="No refresh token")
 
-    client = CognitoClient()
     try:
-        new_tokens = client.refresh_token(refresh_tok)
-    except Exception as exc:
+        new_tokens = await refresh_tokens(refresh_tok)
+    except (TokenExchangeError, httpx.HTTPError) as exc:
         logger.exception("Token refresh failed")
-        _clear_auth_cookies(response)
-        raise HTTPException(status_code=401, detail="Token refresh failed") from exc
+        error_response = JSONResponse(
+            status_code=401,
+            content={"detail": "Token refresh failed", "code": "AUTH_ERROR"},
+        )
+        _clear_auth_cookies(error_response)
+        return error_response  # type: ignore[return-value]
 
+    # Parse the new ID token to get user profile
+    try:
+        profile = parse_id_token_claims(new_tokens["id_token"])
+    except Exception as exc:
+        logger.exception("ID token validation failed after refresh")
+        error_response = JSONResponse(
+            status_code=401,
+            content={"detail": "Token refresh failed", "code": "AUTH_ERROR"},
+        )
+        _clear_auth_cookies(error_response)
+        return error_response  # type: ignore[return-value]
+
+    # Update the access token cookie
     response.set_cookie(
         key=ACCESS_TOKEN_COOKIE,
-        value=new_tokens["access_token"],
+        value=_safe_token(new_tokens["access_token"], ACCESS_TOKEN_COOKIE),
         max_age=new_tokens.get("expires_in", 3600),
         **_COOKIE_SETTINGS,
     )
-    return AuthTokenResponse()
+
+    return AuthResponse(
+        user=UserProfile(
+            id=profile["id"],
+            email=profile["email"],
+            name=profile.get("name"),
+        )
+    )
+
+
+@router.post("/logout", response_model=LogoutResponse)
+async def logout(response: Response, settings=Depends(get_settings)) -> LogoutResponse:
+    """Clear authentication cookies and return the Cognito logout URL."""
+    _clear_auth_cookies(response)
+
+    logout_url = (
+        f"https://{settings.COGNITO_DOMAIN}/logout"
+        f"?client_id={settings.COGNITO_CLIENT_ID}"
+        f"&logout_uri={settings.FRONTEND_URL}"
+    )
+
+    return LogoutResponse(logout_url=logout_url)
+
+
+@router.get("/me", response_model=AuthResponse)
+async def me(claims: dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
+    """Return the current user's profile from the JWT claims."""
+    return AuthResponse(
+        user=UserProfile(
+            id=claims["sub"],
+            email=claims["email"],
+            name=claims.get("name"),
+        )
+    )
