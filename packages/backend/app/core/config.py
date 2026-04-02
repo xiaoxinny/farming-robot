@@ -25,8 +25,36 @@ class Settings(BaseSettings):
     COGNITO_USER_POOL_ID: str
     COGNITO_CLIENT_ID: str
 
+    # OIDC / Cognito Hosted UI
+    COGNITO_DOMAIN: str
+    COGNITO_REDIRECT_URI: str
+    COGNITO_CLIENT_SECRET: str | None = None
+
     # Frontend
     FRONTEND_URL: str = "http://localhost:5173"
+
+    @property
+    def cognito_authorize_url(self) -> str:
+        """Cognito OIDC authorization endpoint."""
+        return f"https://{self.COGNITO_DOMAIN}/oauth2/authorize"
+
+    @property
+    def cognito_token_url(self) -> str:
+        """Cognito OIDC token endpoint."""
+        return f"https://{self.COGNITO_DOMAIN}/oauth2/token"
+
+    @property
+    def cognito_logout_url(self) -> str:
+        """Cognito logout endpoint."""
+        return f"https://{self.COGNITO_DOMAIN}/logout"
+
+    @property
+    def cognito_jwks_url(self) -> str:
+        """Cognito JWKS endpoint derived from region and user pool ID."""
+        return (
+            f"https://cognito-idp.{self.AWS_REGION}.amazonaws.com"
+            f"/{self.COGNITO_USER_POOL_ID}/.well-known/jwks.json"
+        )
 
     model_config = {
         "env_file": ".env",

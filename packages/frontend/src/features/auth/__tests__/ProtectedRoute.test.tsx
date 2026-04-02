@@ -39,21 +39,6 @@ describe("ProtectedRoute — Property 5: Session Expiry Redirect", () => {
     expect(screen.queryByTestId("protected-content")).not.toBeInTheDocument();
   });
 
-  it("redirects to /mfa when status is 'mfa_pending'", () => {
-    mockUseAuth.mockReturnValue({ status: "mfa_pending", isLoading: false });
-
-    render(
-      <MemoryRouter initialEntries={["/dashboard"]}>
-        <ProtectedRoute>
-          <div data-testid="protected-content">Secret Dashboard</div>
-        </ProtectedRoute>
-      </MemoryRouter>,
-    );
-
-    // Protected content should NOT be rendered
-    expect(screen.queryByTestId("protected-content")).not.toBeInTheDocument();
-  });
-
   it("renders children when status is 'authenticated'", () => {
     mockUseAuth.mockReturnValue({ status: "authenticated", isLoading: false });
 

@@ -2,8 +2,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, act, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import fc from "fast-check";
 import { AuthProvider, useAuth } from "../AuthProvider";
+
+// Mock the auth module (PKCE helpers)
+vi.mock("@/lib/auth", () => ({
+  generateCodeVerifier: vi.fn(() => "test-verifier"),
+  generateCodeChallenge: vi.fn(() => Promise.resolve("test-challenge")),
+  generateState: vi.fn(() => "test-state"),
+  buildAuthorizeUrl: vi.fn(
+    (challenge: string, state: string) =>
+      `https://cognito.example.com/oauth2/authorize?code_challenge=${challenge}&state=${state}`,
+  ),
+}));
 
 // Mock the api module
 vi.mock("@/lib/api", () => ({
@@ -23,6 +33,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { api } from "@/lib/api";
+import { buildAuthorizeUrl } from "@/lib/auth";
 
 const mockPost = api.post as ReturnType<typeof vi.fn>;
 
@@ -59,17 +70,22 @@ function createWrapper() {
 }
 
 /**
- * Property 3: Authentication Flow State Machine
+ * OIDC Authentication Flow Tests
  *
- * The auth flow must follow a valid state progression:
- * Unauthenticated -> Primary Auth -> MFA Challenge -> Authenticated.
- * No state can be skipped.
+ * Tests the OIDC authorization code flow with PKCE:
+ * loginWithRedirect → handleCallback → authenticated
  *
- * **Validates: Requirements 3 (AC 3.1-3.4)**
+ * **Validates: Requirements 1.2, 2.3, 5.1**
  */
-describe("AuthFlow - Property 3: Authentication Flow State Machine", () => {
+describe("AuthFlow - OIDC Authorization Code Flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    sessionStorage.clear();
+    // Prevent jsdom from navigating on location.href assignment
+    Object.defineProperty(window, "location", {
+      writable: true,
+      value: { ...window.location, href: "" },
+    });
   });
 
   it("initial state is 'unauthenticated' when token refresh fails", async () => {
@@ -82,16 +98,14 @@ describe("AuthFlow - Property 3: Authentication Flow State Machine", () => {
           captured = ctx;
         }}
       />,
-      {
-        wrapper: createWrapper(),
-      },
+      { wrapper: createWrapper() },
     );
 
     await waitFor(() => expect(captured?.isLoading).toBe(false));
     expect(captured?.status).toBe("unauthenticated");
   });
 
-  it("login with MFA required transitions to mfa_pending", async () => {
+  it("loginWithRedirect stores PKCE params in sessionStorage and calls buildAuthorizeUrl", async () => {
     mockPost.mockRejectedValueOnce(new Error("No session"));
 
     let captured: ReturnType<typeof useAuth> | null = null;
@@ -101,23 +115,21 @@ describe("AuthFlow - Property 3: Authentication Flow State Machine", () => {
           captured = ctx;
         }}
       />,
-      {
-        wrapper: createWrapper(),
-      },
+      { wrapper: createWrapper() },
     );
 
     await waitFor(() => expect(captured?.isLoading).toBe(false));
-    expect(captured?.status).toBe("unauthenticated");
 
-    mockPost.mockResolvedValueOnce({ mfa_required: true });
     await act(async () => {
-      await captured!.login("user@example.com", "password123");
+      await captured!.loginWithRedirect();
     });
 
-    expect(captured?.status).toBe("mfa_pending");
+    expect(sessionStorage.getItem("pkce_code_verifier")).toBe("test-verifier");
+    expect(sessionStorage.getItem("oauth_state")).toBe("test-state");
+    expect(buildAuthorizeUrl).toHaveBeenCalledWith("test-challenge", "test-state");
   });
 
-  it("verifyMfa transitions from mfa_pending to authenticated", async () => {
+  it("handleCallback transitions to 'authenticated' state", async () => {
     mockPost.mockRejectedValueOnce(new Error("No session"));
 
     let captured: ReturnType<typeof useAuth> | null = null;
@@ -127,97 +139,53 @@ describe("AuthFlow - Property 3: Authentication Flow State Machine", () => {
           captured = ctx;
         }}
       />,
-      {
-        wrapper: createWrapper(),
-      },
+      { wrapper: createWrapper() },
     );
 
     await waitFor(() => expect(captured?.isLoading).toBe(false));
+    expect(captured?.status).toBe("unauthenticated");
 
-    // Login -> MFA required
-    mockPost.mockResolvedValueOnce({ mfa_required: true });
-    await act(async () => {
-      await captured!.login("user@example.com", "password123");
-    });
-    expect(captured?.status).toBe("mfa_pending");
-
-    // Verify MFA -> authenticated
-    const mockUser = { id: "1", email: "user@example.com", name: "Test" };
+    const mockUser = { id: "1", email: "user@example.com", name: "Test User" };
     mockPost.mockResolvedValueOnce({ user: mockUser });
+
     await act(async () => {
-      await captured!.verifyMfa("123456");
+      await captured!.handleCallback("auth-code-123", "verifier-456");
     });
+
     expect(captured?.status).toBe("authenticated");
     expect(captured?.user).toEqual(mockUser);
+    expect(mockPost).toHaveBeenCalledWith("/auth/callback", {
+      code: "auth-code-123",
+      code_verifier: "verifier-456",
+    });
   });
 
-  it("state transitions follow unauthenticated -> mfa_pending -> authenticated for any valid credentials (property test)", async () => {
-    await fc.assert(
-      fc.asyncProperty(
-        fc.record({
-          email: fc.emailAddress(),
-          password: fc.string({ minLength: 1, maxLength: 50 }),
-          mfaCode: fc.stringMatching(/^[0-9]{6}$/),
-        }),
-        async ({ email, password, mfaCode }) => {
-          vi.clearAllMocks();
+  it("logout calls backend and gets logout_url", async () => {
+    // Start authenticated via successful token refresh
+    const mockUser = { id: "1", email: "user@example.com", name: "Test" };
+    mockPost.mockResolvedValueOnce({ user: mockUser });
 
-          // Token refresh fails -> unauthenticated
-          mockPost.mockRejectedValueOnce(new Error("No session"));
-
-          const states: string[] = [];
-          let captured: ReturnType<typeof useAuth> | null = null;
-
-          const { unmount } = render(
-            <AuthConsumer
-              onRender={(ctx) => {
-                captured = ctx;
-                if (
-                  !ctx.isLoading &&
-                  (states.length === 0 ||
-                    states[states.length - 1] !== ctx.status)
-                ) {
-                  states.push(ctx.status);
-                }
-              }}
-            />,
-            { wrapper: createWrapper() },
-          );
-
-          // Wait for initial load to complete
-          await waitFor(() => expect(captured?.isLoading).toBe(false));
-
-          // Login -> MFA required
-          mockPost.mockResolvedValueOnce({ mfa_required: true });
-          await act(async () => {
-            await captured!.login(email, password);
-          });
-
-          // Wait for mfa_pending state to be captured
-          await waitFor(() => expect(captured?.status).toBe("mfa_pending"));
-
-          // Verify MFA -> authenticated
-          mockPost.mockResolvedValueOnce({
-            user: { id: "u1", email, name: "User" },
-          });
-          await act(async () => {
-            await captured!.verifyMfa(mfaCode);
-          });
-
-          // Wait for authenticated state to be captured
-          await waitFor(() => expect(captured?.status).toBe("authenticated"));
-
-          // Verify the full state progression
-          expect(states).toEqual([
-            "unauthenticated",
-            "mfa_pending",
-            "authenticated",
-          ]);
-
-          unmount();
-        },
-      ),
-      { numRuns: 10 },
+    let captured: ReturnType<typeof useAuth> | null = null;
+    render(
+      <AuthConsumer
+        onRender={(ctx) => {
+          captured = ctx;
+        }}
+      />,
+      { wrapper: createWrapper() },
     );
+
+    await waitFor(() => expect(captured?.isLoading).toBe(false));
+    expect(captured?.status).toBe("authenticated");
+
+    const logoutUrl = "https://cognito.example.com/logout?client_id=abc";
+    mockPost.mockResolvedValueOnce({ logout_url: logoutUrl });
+
+    await act(async () => {
+      await captured!.logout();
+    });
+
+    expect(mockPost).toHaveBeenCalledWith("/auth/logout");
+    expect(window.location.href).toBe(logoutUrl);
   });
 });

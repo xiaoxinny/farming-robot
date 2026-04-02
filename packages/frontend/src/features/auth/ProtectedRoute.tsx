@@ -7,7 +7,6 @@ import type { ReactNode } from "react";
  *
  * - While the initial token refresh is in flight, shows a loading spinner.
  * - If unauthenticated, redirects to `/login`.
- * - If MFA is pending, redirects to `/mfa`.
  * - If authenticated, renders children.
  */
 export function ProtectedRoute({ children }: { children: ReactNode }) {
@@ -27,10 +26,6 @@ export function ProtectedRoute({ children }: { children: ReactNode }) {
 
   if (status === "unauthenticated") {
     return <Navigate to="/login" replace />;
-  }
-
-  if (status === "mfa_pending") {
-    return <Navigate to="/mfa" replace />;
   }
 
   return <>{children}</>;
