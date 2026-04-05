@@ -1,4 +1,4 @@
-"""JWT validation, Cognito client wrapper, and MFA failure tracking."""
+"""JWT validation and Cognito OIDC token helpers."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import threading
 import time
 from typing import Any
 
-import boto3
 import httpx
 from jose import JWTError, jwk, jwt
 
@@ -31,15 +30,17 @@ def _jwks_url(settings: Settings) -> str:
     )
 
 
-def _get_jwks(settings: Settings) -> dict[str, Any]:
-    """Return cached JWKS keys, refreshing if stale."""
+def _get_jwks(settings: Settings, *, force_refresh: bool = False) -> dict[str, Any]:
+    """Return cached JWKS keys, refreshing if stale or forced."""
     global _jwks_cache  # noqa: PLW0603
-    with _jwks_lock:
-        if (
-            _jwks_cache.get("keys")
-            and time.time() - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL_SECONDS
-        ):
-            return _jwks_cache
+
+    if not force_refresh:
+        with _jwks_lock:
+            if (
+                _jwks_cache.get("keys")
+                and time.time() - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL_SECONDS
+            ):
+                return _jwks_cache
 
     url = _jwks_url(settings)
     resp = httpx.get(url, timeout=10)
@@ -51,8 +52,19 @@ def _get_jwks(settings: Settings) -> dict[str, Any]:
     return _jwks_cache
 
 
+def _find_key(jwks: dict[str, Any], kid: str) -> dict[str, Any] | None:
+    """Find a key by kid in the JWKS keyset."""
+    for k in jwks["keys"]:
+        if k["kid"] == kid:
+            return k
+    return None
+
+
 def validate_token(token: str, settings: Settings | None = None) -> dict[str, Any]:
     """Validate a Cognito-issued JWT and return its claims.
+
+    If the token's ``kid`` is not found in the cached JWKS, the cache is
+    refreshed once before rejecting the token.
 
     Raises ``JWTError`` when the token is invalid or expired.
     """
@@ -63,11 +75,12 @@ def validate_token(token: str, settings: Settings | None = None) -> dict[str, An
     headers = jwt.get_unverified_headers(token)
     kid = headers.get("kid")
 
-    key_data: dict[str, Any] | None = None
-    for k in jwks["keys"]:
-        if k["kid"] == kid:
-            key_data = k
-            break
+    key_data = _find_key(jwks, kid)
+
+    # Unknown kid — force a single cache refresh and retry
+    if key_data is None:
+        jwks = _get_jwks(settings, force_refresh=True)
+        key_data = _find_key(jwks, kid)
 
     if key_data is None:
         raise JWTError("Public key not found in JWKS")
@@ -89,172 +102,102 @@ def validate_token(token: str, settings: Settings | None = None) -> dict[str, An
 
 
 # ---------------------------------------------------------------------------
-# MFA failure tracker (in-memory, thread-safe)
-# ---------------------------------------------------------------------------
-_mfa_failures: dict[str, int] = {}
-_mfa_lock = threading.Lock()
-MAX_MFA_ATTEMPTS = 3
-
-
-def get_mfa_failure_count(username: str) -> int:
-    """Return the current consecutive MFA failure count for a user."""
-    with _mfa_lock:
-        return _mfa_failures.get(username, 0)
-
-
-def record_mfa_failure(username: str) -> int:
-    """Increment and return the MFA failure count for *username*."""
-    with _mfa_lock:
-        _mfa_failures[username] = _mfa_failures.get(username, 0) + 1
-        return _mfa_failures[username]
-
-
-def reset_mfa_failures(username: str) -> None:
-    """Reset the MFA failure counter after a successful verification."""
-    with _mfa_lock:
-        _mfa_failures.pop(username, None)
-
-
-# ---------------------------------------------------------------------------
-# Cognito client wrapper
+# OIDC token exchange helpers
 # ---------------------------------------------------------------------------
 
 
-class CognitoClient:
-    """Thin wrapper around the ``cognito-idp`` boto3 client.
+class TokenExchangeError(Exception):
+    """Raised when a Cognito token endpoint request fails."""
 
-    All configuration is pulled from the application ``Settings`` instance
-    so nothing is hardcoded.
+
+async def exchange_code_for_tokens(
+    code: str,
+    code_verifier: str,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Exchange an authorization code for tokens at the Cognito token endpoint.
+
+    Returns a dict with ``access_token``, ``id_token``, ``refresh_token``,
+    and ``expires_in``.
+
+    Raises ``TokenExchangeError`` if the response is not 200.
     """
+    if settings is None:
+        settings = get_settings()
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        self.settings = settings or get_settings()
-        self._client = boto3.client(
-            "cognito-idp",
-            region_name=self.settings.AWS_REGION,
+    data: dict[str, str] = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "code_verifier": code_verifier,
+        "redirect_uri": settings.COGNITO_REDIRECT_URI,
+        "client_id": settings.COGNITO_CLIENT_ID,
+    }
+    if settings.COGNITO_CLIENT_SECRET:
+        data["client_secret"] = settings.COGNITO_CLIENT_SECRET
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            settings.cognito_token_url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
         )
 
-    # -- public helpers -----------------------------------------------------
+    if resp.status_code != 200:
+        logger.error("Token exchange failed with status %s", resp.status_code)
+        raise TokenExchangeError(f"Token exchange failed with status {resp.status_code}")
 
-    def authenticate(self, email: str, password: str) -> dict[str, Any]:
-        """Initiate username/password authentication.
+    return resp.json()
 
-        Returns either:
-        * ``{"tokens": {...}}`` when no MFA is required, or
-        * ``{"mfa_required": True, "session": "...", "username": "..."}``
-          when the user must complete an MFA challenge.
-        """
-        resp = self._client.initiate_auth(
-            ClientId=self.settings.COGNITO_CLIENT_ID,
-            AuthFlow="USER_PASSWORD_AUTH",
-            AuthParameters={
-                "USERNAME": email,
-                "PASSWORD": password,
-            },
+
+async def refresh_tokens(
+    refresh_token: str,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Refresh tokens using the Cognito OIDC token endpoint.
+
+    Returns a dict with ``access_token``, ``id_token``, and ``expires_in``.
+
+    Raises ``TokenExchangeError`` if the response is not 200.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    data: dict[str, str] = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": settings.COGNITO_CLIENT_ID,
+    }
+    if settings.COGNITO_CLIENT_SECRET:
+        data["client_secret"] = settings.COGNITO_CLIENT_SECRET
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            settings.cognito_token_url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=10,
         )
 
-        if (
-            resp.get("ChallengeName") == "SMS_MFA"
-            or resp.get("ChallengeName") == "SOFTWARE_TOKEN_MFA"
-        ):
-            return {
-                "mfa_required": True,
-                "session": resp["Session"],
-                "challenge": resp["ChallengeName"],
-                "username": email,
-            }
+    if resp.status_code != 200:
+        logger.error("Token refresh failed with status %s", resp.status_code)
+        raise TokenExchangeError(f"Token refresh failed with status {resp.status_code}")
 
-        result = resp.get("AuthenticationResult", {})
-        return {
-            "tokens": {
-                "access_token": result.get("AccessToken", ""),
-                "id_token": result.get("IdToken", ""),
-                "refresh_token": result.get("RefreshToken", ""),
-                "expires_in": result.get("ExpiresIn", 3600),
-            }
-        }
-
-    def verify_mfa(self, session: str, code: str, username: str) -> dict[str, Any]:
-        """Respond to an MFA challenge.
-
-        On success the failure counter is reset and tokens are returned.
-        On the 3rd consecutive failure the account is locked via
-        ``AdminDisableUser``.
-
-        Returns ``{"tokens": {...}}`` on success.
-        Raises ``MfaVerificationError`` on failure.
-        """
-        try:
-            resp = self._client.respond_to_auth_challenge(
-                ClientId=self.settings.COGNITO_CLIENT_ID,
-                ChallengeName="SOFTWARE_TOKEN_MFA",
-                Session=session,
-                ChallengeResponses={
-                    "USERNAME": username,
-                    "SOFTWARE_TOKEN_MFA_CODE": code,
-                },
-            )
-        except self._client.exceptions.CodeMismatchException:
-            count = record_mfa_failure(username)
-            if count >= MAX_MFA_ATTEMPTS:
-                self._lock_account(username)
-                raise AccountLockedError(username) from None
-            raise MfaVerificationError(
-                f"Invalid MFA code. {MAX_MFA_ATTEMPTS - count} attempt(s) remaining."
-            ) from None
-
-        # Success — reset counter and return tokens
-        reset_mfa_failures(username)
-        result = resp.get("AuthenticationResult", {})
-        return {
-            "tokens": {
-                "access_token": result.get("AccessToken", ""),
-                "id_token": result.get("IdToken", ""),
-                "refresh_token": result.get("RefreshToken", ""),
-                "expires_in": result.get("ExpiresIn", 3600),
-            }
-        }
-
-    def refresh_token(self, refresh_tok: str) -> dict[str, Any]:
-        """Exchange a refresh token for new access/id tokens."""
-        resp = self._client.initiate_auth(
-            ClientId=self.settings.COGNITO_CLIENT_ID,
-            AuthFlow="REFRESH_TOKEN_AUTH",
-            AuthParameters={"REFRESH_TOKEN": refresh_tok},
-        )
-        result = resp.get("AuthenticationResult", {})
-        return {
-            "access_token": result.get("AccessToken", ""),
-            "id_token": result.get("IdToken", ""),
-            "expires_in": result.get("ExpiresIn", 3600),
-        }
-
-    def _lock_account(self, username: str) -> None:
-        """Disable the user account in Cognito after too many MFA failures."""
-        logger.warning(
-            "Locking account for user %s after %d MFA failures", username, MAX_MFA_ATTEMPTS
-        )
-        self._client.admin_disable_user(
-            UserPoolId=self.settings.COGNITO_USER_POOL_ID,
-            Username=username,
-        )
+    return resp.json()
 
 
-# ---------------------------------------------------------------------------
-# Custom exceptions
-# ---------------------------------------------------------------------------
+def parse_id_token_claims(
+    id_token: str,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Validate an ID token and extract user profile claims.
 
-
-class MfaVerificationError(Exception):
-    """Raised when an MFA code is incorrect but the account is not yet locked."""
-
-
-class AccountLockedError(Exception):
-    """Raised when the account has been locked due to repeated MFA failures."""
-
-    def __init__(self, username: str) -> None:
-        self.username = username
-        super().__init__(
-            f"Account {username} has been locked after {MAX_MFA_ATTEMPTS} "
-            "consecutive MFA failures. Please contact support."
-        )
+    Returns a dict with ``id`` (from ``sub``), ``email``, and ``name``
+    (or ``None`` if the name claim is absent).
+    """
+    claims = validate_token(id_token, settings)
+    return {
+        "id": claims["sub"],
+        "email": claims["email"],
+        "name": claims.get("name"),
+    }

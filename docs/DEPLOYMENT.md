@@ -6,26 +6,32 @@ Coolify is a self-hosted PaaS that deploys applications from Git repositories us
 
 This is a single-page application (SPA). The frontend is a static React bundle served by nginx — all routing happens client-side via React Router. The backend is a standalone FastAPI REST API that the SPA calls over HTTPS. There is no server-side rendering.
 
+PostgreSQL runs locally on the same Coolify server, managed by Coolify's built-in database support. Authentication uses the OIDC Authorization Code Flow via the Cognito Hosted UI. S3 stores simulation media.
+
 ```
-Browser (SPA)  ──HTTPS──▶  nginx (static files)
+Browser (SPA)  ──redirect──▶  Cognito Hosted UI
+    │                              │
+    │◀──── redirect with code ─────┘
     │
-    └──── API calls ──▶  FastAPI (Gunicorn + Uvicorn)
-                              │
-                    ┌─────────┼──────────┐
-                    ▼         ▼          ▼
-               Cognito    RDS/PG       S3
+    └──── POST /api/auth/callback ──▶  FastAPI (Gunicorn + Uvicorn)
+                                            │
+                                  ┌─────────┼──────────┐
+                                  ▼         ▼          ▼
+                             Cognito    PostgreSQL     S3
+                          /oauth2/token  (Coolify)   (AWS)
 ```
 
-| Service    | Image         | Port | Description                          |
-| ---------- | ------------- | ---- | ------------------------------------ |
-| `frontend` | nginx:1.27    | 80   | Serves the built React SPA           |
-| `backend`  | python:3.12   | 8000 | FastAPI served via Gunicorn + Uvicorn |
+| Service      | Image         | Port | Description                              |
+| ------------ | ------------- | ---- | ---------------------------------------- |
+| `frontend`   | nginx:1.27    | 80   | Serves the built React SPA               |
+| `backend`    | python:3.12   | 8000 | FastAPI served via Gunicorn + Uvicorn     |
+| `postgresql` | postgres:16   | 5432 | Managed by Coolify (not in compose file)  |
 
 ## Prerequisites
 
 - A Coolify instance (v4+) with a connected server
 - A Git repository (GitHub, GitLab, or Gitea) containing this project
-- An AWS account with access to Cognito, RDS, and S3
+- An AWS account with access to Cognito and S3
 - (Optional) AWS CLI installed and configured locally
 
 ---
@@ -46,7 +52,7 @@ Cognito handles all authentication: password login, OAuth, passwordless, and MFA
 4. Name the application `agritech-web-client`
 5. Under **Options for sign-in identifiers**, select **Email**
 6. Under **Required attributes for sign-up**, keep **email** selected
-7. For **Return URL**, enter `https://agritech.example.com/login` (your frontend domain — you can change this later)
+7. For **Return URL**, enter `https://agritech.example.com/auth/callback` (your frontend domain — you can change this later)
 8. Click **Create**
 9. From the **User pool overview** page, note the **User pool ID** (e.g., `ap-southeast-1_AbCdEfGhI`) — this is your `COGNITO_USER_POOL_ID`
 10. Go to **App clients** in the left sidebar, click your app client, and note the **Client ID** — this is your `COGNITO_CLIENT_ID`
@@ -93,6 +99,35 @@ aws cognito-idp create-user-pool-client \
 
 Note the `UserPoolClient.ClientId` — this is your `COGNITO_CLIENT_ID`.
 
+#### 1.1.1 Configure Cognito Hosted UI Domain
+
+The Hosted UI requires a domain prefix. This is a separate domain from the Cognito issuer URL — Cognito has two different URL patterns:
+
+- **Issuer URL**: `https://cognito-idp.{region}.amazonaws.com/{pool_id}` — used internally for JWT validation and OIDC discovery. You don't need to configure this; it's derived from `AWS_REGION` + `COGNITO_USER_POOL_ID`.
+- **Hosted UI domain**: `https://{prefix}.auth.{region}.amazoncognito.com` — the actual login page where users authenticate, and where the `/oauth2/authorize`, `/oauth2/token`, and `/logout` endpoints live. This is what `COGNITO_DOMAIN` refers to, and you must create it explicitly.
+
+> **Note:** If you've seen the Flask `authlib` example from AWS docs, the `authority` and `server_metadata_url` fields use the issuer URL, not the Hosted UI domain. Our app uses both: the issuer URL for token validation, and the Hosted UI domain for login redirects and token exchange.
+
+##### Console (GUI)
+
+1. Go to your user pool → **App integration** → **Domain**
+2. Click **Actions** → **Create Cognito domain**
+3. Enter a domain prefix (e.g., `agrivo`)
+4. Click **Create**
+5. Note the full domain: `agrivo.auth.ap-southeast-1.amazoncognito.com` — this is your `COGNITO_DOMAIN` (without `https://`)
+
+##### CLI
+
+```bash
+aws cognito-idp create-user-pool-domain \
+  --user-pool-id <POOL_ID> \
+  --domain agrivo \
+  --region ap-southeast-1
+```
+
+The full domain will be: `agrivo.auth.ap-southeast-1.amazoncognito.com`
+
+You can verify it's working by visiting `https://agrivo.auth.ap-southeast-1.amazoncognito.com/.well-known/openid-configuration` in your browser — it should return a JSON document with the OIDC endpoints.
 
 ### 1.2 (Optional) Add Google OAuth Provider
 
@@ -112,11 +147,13 @@ Note the `UserPoolClient.ClientId` — this is your `COGNITO_CLIENT_ID`.
 
 8. Go to **App clients** → select your client → **Edit hosted UI**
 9. Under **Identity providers**, add **Google** alongside **Cognito**
-10. Set **Callback URL** to `https://agritech.example.com/login`
-11. Set **Sign-out URL** to `https://agritech.example.com`
+10. Set **Callback URL** to `https://your-domain.com/auth/callback`
+11. Set **Sign-out URL** to `https://your-domain.com`
 12. Under **OAuth 2.0 grant types**, select **Authorization code grant**
 13. Under **OpenID Connect scopes**, select `openid`, `email`, `profile`
 14. Click **Save changes**
+
+> **Note:** The callback URL must match the `COGNITO_REDIRECT_URI` environment variable exactly. The sign-out URL must match `FRONTEND_URL`. These settings apply to all identity providers (Cognito direct and Google). This configuration aligns with the patterns used in the Node.js (`openid-client`) and Python (`authlib`) Cognito integration examples.
 
 #### CLI
 
@@ -133,86 +170,19 @@ aws cognito-idp update-user-pool-client \
   --user-pool-id <POOL_ID> \
   --client-id <CLIENT_ID> \
   --supported-identity-providers COGNITO Google \
-  --callback-urls '["https://agritech.example.com/login"]' \
-  --logout-urls '["https://agritech.example.com"]' \
+  --callback-urls '["https://your-domain.com/auth/callback"]' \
+  --logout-urls '["https://your-domain.com"]' \
   --allowed-o-auth-flows code \
   --allowed-o-auth-scopes openid email profile \
   --allowed-o-auth-flows-user-pool-client \
   --region ap-southeast-1
 ```
 
-### 1.3 Create an RDS PostgreSQL Instance
+### 1.3 Create an S3 Bucket for Simulation Media
 
-#### Console (GUI)
+S3 is used to store simulation media files. The backend generates presigned URLs so the frontend can access them without making the bucket public.
 
-1. Open the [Amazon RDS console](https://console.aws.amazon.com/rds/) in **ap-southeast-1**
-2. Click **Create database**
-3. Choose **Standard create**
-4. Configuration:
-   - **Engine**: PostgreSQL
-   - **Engine version**: PostgreSQL 16.4
-   - **Templates**: Free tier (for dev) or Production
-   - **DB instance identifier**: `agritech-db`
-   - **Master username**: `agritech_admin`
-   - **Master password**: choose a strong password and save it securely
-5. Instance configuration:
-   - **DB instance class**: `db.t4g.micro` (Free tier eligible) or `db.t4g.small` for production
-6. Storage:
-   - **Storage type**: gp3
-   - **Allocated storage**: 20 GiB
-7. Connectivity:
-   - **VPC**: select your VPC (or use the default)
-   - **Public access**: Yes (for initial setup — change to No for production)
-   - **VPC security group**: Create new, name it `agritech-db-sg`
-   - Add an inbound rule for PostgreSQL (port 5432) from your Coolify server's IP
-8. Additional configuration:
-   - **Initial database name**: `agritech`
-   - **Backup retention**: 7 days
-   - **Enable deletion protection**: Yes (for production)
-9. Click **Create database**
-10. Wait for the status to show **Available** (takes 5-10 minutes)
-11. Click the DB instance → note the **Endpoint** under Connectivity & security
-
-Your `DATABASE_URL` is: `postgresql://agritech_admin:<PASSWORD>@<ENDPOINT>:5432/agritech`
-
-#### CLI
-
-```bash
-aws rds create-db-subnet-group \
-  --db-subnet-group-name agritech-db-subnet \
-  --db-subnet-group-description "AgriTech DB subnets" \
-  --subnet-ids <SUBNET_1> <SUBNET_2> \
-  --region ap-southeast-1
-
-aws rds create-db-instance \
-  --db-instance-identifier agritech-db \
-  --db-instance-class db.t4g.micro \
-  --engine postgres \
-  --engine-version 16.4 \
-  --master-username agritech_admin \
-  --master-user-password '<STRONG_PASSWORD>' \
-  --allocated-storage 20 \
-  --storage-type gp3 \
-  --db-name agritech \
-  --db-subnet-group-name agritech-db-subnet \
-  --publicly-accessible \
-  --backup-retention-period 7 \
-  --region ap-southeast-1
-
-aws rds wait db-instance-available \
-  --db-instance-identifier agritech-db \
-  --region ap-southeast-1
-
-aws rds describe-db-instances \
-  --db-instance-identifier agritech-db \
-  --query 'DBInstances[0].Endpoint.Address' \
-  --output text \
-  --region ap-southeast-1
-```
-
-**Security note:** For production, set `--no-publicly-accessible` and connect via VPC peering or a bastion host.
-
-### 1.4 Create an S3 Bucket for Simulation Media
+**Cost note:** An empty S3 bucket costs nothing. S3 pricing is purely pay-for-what-you-use — you're only charged for stored objects (~$0.025/GB/month for S3 Standard in ap-southeast-1), requests, and data transfer. Creating the bucket now and leaving it empty until you need it is free.
 
 #### Console (GUI)
 
@@ -244,9 +214,9 @@ aws s3api put-bucket-versioning \
   --versioning-configuration Status=Enabled
 ```
 
-### 1.5 Create an IAM User for the Backend
+### 1.4 Create an IAM User for the Backend
 
-The backend needs programmatic access to Cognito (admin APIs for MFA lockout) and S3 (presigned URLs for simulation media).
+The backend needs programmatic access to S3 (presigned URLs for simulation media). Authentication is handled via the OIDC flow with Cognito's Hosted UI, so no Cognito admin API permissions are needed.
 
 #### Console (GUI)
 
@@ -263,15 +233,6 @@ The backend needs programmatic access to Cognito (admin APIs for MFA lockout) an
        {
          "Effect": "Allow",
          "Action": [
-           "cognito-idp:AdminDisableUser",
-           "cognito-idp:AdminEnableUser",
-           "cognito-idp:AdminGetUser"
-         ],
-         "Resource": "arn:aws:cognito-idp:ap-southeast-1:<ACCOUNT_ID>:userpool/<POOL_ID>"
-       },
-       {
-         "Effect": "Allow",
-         "Action": [
            "s3:GetObject",
            "s3:PutObject",
            "s3:ListBucket"
@@ -284,7 +245,6 @@ The backend needs programmatic access to Cognito (admin APIs for MFA lockout) an
      ]
    }
    ```
-   - Replace `<ACCOUNT_ID>` with your AWS account ID and `<POOL_ID>` with your Cognito User Pool ID
    - Name the policy `agritech-backend-policy`
    - Click **Create policy**
 6. Back in the user creation tab, refresh the policy list and attach `agritech-backend-policy`
@@ -307,15 +267,6 @@ aws iam put-user-policy \
       {
         "Effect": "Allow",
         "Action": [
-          "cognito-idp:AdminDisableUser",
-          "cognito-idp:AdminEnableUser",
-          "cognito-idp:AdminGetUser"
-        ],
-        "Resource": "arn:aws:cognito-idp:ap-southeast-1:<ACCOUNT_ID>:userpool/<POOL_ID>"
-      },
-      {
-        "Effect": "Allow",
-        "Action": [
           "s3:GetObject",
           "s3:PutObject",
           "s3:ListBucket"
@@ -331,31 +282,38 @@ aws iam put-user-policy \
 aws iam create-access-key --user-name agritech-backend
 ```
 
-### 1.6 Summary of Values to Collect
+### 1.5 Summary of Values to Collect
 
 After completing Part 1, you should have:
 
-| Value                    | Source                  | Example                                        |
-| ------------------------ | ----------------------- | ---------------------------------------------- |
-| `COGNITO_USER_POOL_ID`   | Cognito → User pool ID | `ap-southeast-1_AbCdEfGhI`                    |
-| `COGNITO_CLIENT_ID`      | Cognito → App client   | `1abc2def3ghi4jkl5mno6pqr`                    |
-| `DATABASE_URL`           | RDS → Endpoint         | `postgresql://agritech_admin:pw@host:5432/agritech` |
-| `AWS_ACCESS_KEY_ID`      | IAM → Access key       | `AKIAIOSFODNN7EXAMPLE`                         |
-| `AWS_SECRET_ACCESS_KEY`  | IAM → Secret key       | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`   |
+| Value                    | Source                          | Example                                        |
+| ------------------------ | ------------------------------- | ---------------------------------------------- |
+| `COGNITO_USER_POOL_ID`   | Cognito → User pool ID         | `ap-southeast-1_AbCdEfGhI`                    |
+| `COGNITO_CLIENT_ID`      | Cognito → App client           | `1abc2def3ghi4jkl5mno6pqr`                    |
+| `COGNITO_DOMAIN`         | Cognito → App integration → Domain | `agritech.auth.ap-southeast-1.amazoncognito.com` |
+| `COGNITO_REDIRECT_URI`   | Your frontend domain + path    | `https://agritech.example.com/auth/callback`   |
+| `AWS_ACCESS_KEY_ID`      | IAM → Access key               | `AKIAIOSFODNN7EXAMPLE`                         |
+| `AWS_SECRET_ACCESS_KEY`  | IAM → Secret key               | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`   |
+
+The `DATABASE_URL` will come from Coolify in Part 2.
 
 ---
 
 ## Part 2: Coolify Deployment
 
-### 2.1 Create a PostgreSQL Database (Alternative to RDS)
+### 2.1 Create a PostgreSQL Database
 
-If you prefer Coolify's built-in PostgreSQL instead of RDS:
+Coolify can provision and manage a PostgreSQL instance directly on your server — no external database service needed.
 
-1. Go to your project → click **New** → **Database**
-2. Select **PostgreSQL**
-3. Note the connection URL — use it as `DATABASE_URL`
+1. In your Coolify project, click **New** → **Database**
+2. Select **PostgreSQL** (version 16 recommended)
+3. Coolify will create the database container and show you the connection details
+4. Note the **Internal URL** — this is your `DATABASE_URL` (e.g., `postgresql://postgres:generated-password@project-db-1:5432/postgres`)
+5. (Optional) Set a custom database name, username, and password in the database settings before first deploy
 
-Skip this if you set up RDS in Part 1.
+The database runs on the same Docker network as your application services, so the backend connects via the internal hostname. No port exposure or firewall rules needed.
+
+**Backups:** Coolify supports scheduled database backups. Go to your database resource → **Backups** to configure backup frequency and retention. You can back up to local storage or an S3-compatible destination.
 
 ### 2.2 Create a Docker Compose Resource
 
@@ -368,27 +326,40 @@ Skip this if you set up RDS in Part 1.
 
 In the Coolify resource settings, add these environment variables:
 
-**Required:**
+**Backend — Required:**
 
-| Variable                | Example                                          |
-| ----------------------- | ------------------------------------------------ |
-| `SECRET_KEY`            | `a-long-random-string-at-least-32-chars`         |
-| `DATABASE_URL`          | `postgresql://user:pass@db-host:5432/agritech`   |
-| `COGNITO_USER_POOL_ID`  | `ap-southeast-1_AbCdEfGhI`                      |
-| `COGNITO_CLIENT_ID`     | `1abc2def3ghi4jkl5mno6pqr`                      |
-| `AWS_ACCESS_KEY_ID`     | `AKIAIOSFODNN7EXAMPLE`                           |
-| `AWS_SECRET_ACCESS_KEY` | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`     |
+| Variable                | Example                                                          |
+| ----------------------- | ---------------------------------------------------------------- |
+| `SECRET_KEY`            | `a-long-random-string-at-least-32-chars`                         |
+| `DATABASE_URL`          | `postgresql://postgres:password@project-db-1:5432/postgres`      |
+| `COGNITO_USER_POOL_ID`  | `ap-southeast-1_AbCdEfGhI`                                      |
+| `COGNITO_CLIENT_ID`     | `1abc2def3ghi4jkl5mno6pqr`                                      |
+| `COGNITO_DOMAIN`        | `agritech.auth.ap-southeast-1.amazoncognito.com`                 |
+| `COGNITO_REDIRECT_URI`  | `https://agritech.example.com/auth/callback`                     |
+| `AWS_ACCESS_KEY_ID`     | `AKIAIOSFODNN7EXAMPLE`                                           |
+| `AWS_SECRET_ACCESS_KEY` | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`                     |
 
-**Optional:**
+**Backend — Optional:**
 
-| Variable       | Default                    | Description                    |
-| -------------- | -------------------------- | ------------------------------ |
-| `AWS_REGION`   | `ap-southeast-1`           | AWS region for Cognito/S3      |
-| `FRONTEND_URL` | `http://localhost:5173`    | Allowed CORS origin            |
-| `DEBUG`        | `false`                    | Enables /docs and /redoc       |
-| `VITE_API_URL` | `http://localhost:8000`    | Backend URL baked into frontend|
+| Variable                | Default                    | Description                                    |
+| ----------------------- | -------------------------- | ---------------------------------------------- |
+| `AWS_REGION`            | `ap-southeast-1`           | AWS region for Cognito/S3                      |
+| `COGNITO_CLIENT_SECRET` | (empty)                    | Client secret if using a confidential client   |
+| `FRONTEND_URL`          | `http://localhost:5173`    | Allowed CORS origin                            |
+| `DEBUG`                 | `false`                    | Enables /docs and /redoc                       |
 
-**Important:** `VITE_API_URL` is a build-time variable — it gets baked into the frontend bundle during the Docker build. Set `FRONTEND_URL` to your actual frontend domain (e.g., `https://agritech.example.com`) and `VITE_API_URL` to your backend domain (e.g., `https://api.agritech.example.com`).
+**Frontend — Build-time:**
+
+| Variable                     | Example                                              |
+| ---------------------------- | ---------------------------------------------------- |
+| `VITE_API_URL`               | `https://api.agritech.example.com`                   |
+| `VITE_COGNITO_DOMAIN`        | `agritech.auth.ap-southeast-1.amazoncognito.com`     |
+| `VITE_COGNITO_CLIENT_ID`     | `1abc2def3ghi4jkl5mno6pqr`                          |
+| `VITE_COGNITO_REDIRECT_URI`  | `https://agritech.example.com/auth/callback`         |
+
+**Important:** `VITE_*` variables are build-time — they get baked into the frontend bundle during the Docker build. Set `FRONTEND_URL` to your actual frontend domain (e.g., `https://agritech.example.com`) and `VITE_API_URL` to your backend domain (e.g., `https://api.agritech.example.com`).
+
+**Important:** For `DATABASE_URL`, use the internal URL from Coolify's database resource (step 2.1). The hostname is the internal Docker service name, not `localhost`.
 
 ### 2.4 Configure Domains
 
@@ -432,7 +403,7 @@ The healthchecks ensure Coolify waits for services to be ready before routing tr
 
 ### Frontend Dockerfile
 
-1. **Build stage**: Installs npm deps, runs `vite build` with `VITE_API_URL` baked in
+1. **Build stage**: Installs npm deps, runs `vite build` with `VITE_API_URL`, `VITE_COGNITO_DOMAIN`, `VITE_COGNITO_CLIENT_ID`, and `VITE_COGNITO_REDIRECT_URI` baked in
 2. **Production stage**: Copies built assets into nginx, serves with SPA fallback routing
 
 ### Backend Dockerfile
@@ -463,10 +434,19 @@ Check that all required environment variables are set. View container logs in Co
 Ensure `FRONTEND_URL` matches the exact origin of your frontend (including protocol and port if non-standard).
 
 **Database connection refused:**
-If using Coolify's built-in PostgreSQL, make sure the database service is on the same Docker network. Use the internal hostname provided by Coolify. If using RDS, ensure the security group allows inbound connections from your Coolify server's IP on port 5432.
+Make sure the Coolify PostgreSQL database is running and on the same Docker network as the backend. Use the internal hostname from Coolify's database resource — not `localhost` or an external IP. You can verify the connection by checking the database resource status in the Coolify dashboard.
 
 **Cognito errors:**
-Verify `COGNITO_USER_POOL_ID` and `COGNITO_CLIENT_ID` are correct. Ensure the IAM user's access keys (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are set and the policy grants the required Cognito admin actions.
+Verify `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, and `COGNITO_DOMAIN` are correct. Ensure the Cognito app client has the correct callback and sign-out URLs configured.
 
 **S3 presigned URL errors:**
 Ensure the IAM user has `s3:GetObject` permission on the `agritech-simulations` bucket and that `AWS_REGION` matches the bucket's region.
+
+**Redirect URI mismatch:**
+Ensure `COGNITO_REDIRECT_URI` matches exactly what's configured in the Cognito app client callback URLs. The value must be identical — including protocol, domain, and path (e.g., `https://your-domain.com/auth/callback`).
+
+**Invalid grant on callback:**
+The authorization code is single-use and expires in 5 minutes. Ensure the backend exchanges it promptly. If you see this error, the code may have already been used or expired.
+
+**CORS error on token exchange:**
+The token exchange happens server-side (backend to Cognito), not from the browser. If you see CORS errors, the frontend may be trying to call the Cognito token endpoint directly — verify the frontend sends the code to the backend's `/api/auth/callback` endpoint instead.

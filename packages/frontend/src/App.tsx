@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LandingPage } from "@/features/landing/LandingPage";
 import { AuthProvider } from "@/features/auth/AuthProvider";
 import { LoginPage } from "@/features/auth/LoginPage";
-import { MfaChallenge } from "@/features/auth/MfaChallenge";
+import { CallbackPage } from "@/features/auth/CallbackPage";
 import { ProtectedRoute } from "@/features/auth/ProtectedRoute";
 import { DashboardLayout } from "@/features/dashboard/DashboardLayout";
 import { MetricsOverview } from "@/features/dashboard/MetricsOverview";
@@ -41,7 +41,7 @@ function App() {
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/mfa" element={<MfaChallenge />} />
+            <Route path="/auth/callback" element={<CallbackPage />} />
             <Route
               path="/dashboard"
               element={

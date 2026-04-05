@@ -18,16 +18,16 @@ A full-stack web application for an agri-tech startup based in Singapore. The pl
 
 - **Python 3.10+** with **FastAPI** — REST API framework
 - **Pydantic v2** / **pydantic-settings** — request/response validation and config
-- **boto3** — AWS SDK (Cognito, S3)
-- **python-jose** — JWT validation
-- **httpx** — HTTP client for JWKS fetching
-- **psycopg2** — PostgreSQL driver (for future RDS integration)
+- **boto3** — AWS SDK (S3 presigned URLs)
+- **python-jose** — OIDC JWT validation
+- **httpx** — HTTP client for Cognito OIDC token exchange
+- **psycopg2** — PostgreSQL driver
 - **uvicorn** — ASGI server
 
-### Infrastructure (AWS)
+### Infrastructure
 
-- **Amazon Cognito** — user authentication, OAuth, MFA
-- **Amazon RDS (PostgreSQL)** — farm data and sensor readings
+- **Amazon Cognito** — user authentication via OIDC authorization code flow with Hosted UI, OAuth, MFA (with optional Google OAuth)
+- **PostgreSQL** — farm data and sensor readings (managed by Coolify)
 - **Amazon S3** — simulation media and static assets
 
 ## Monorepo Structure
@@ -41,7 +41,7 @@ A full-stack web application for an agri-tech startup based in Singapore. The pl
 │   │   │   ├── components/            # Shared UI (NavigationBar, MediaPlaceholder)
 │   │   │   ├── features/
 │   │   │   │   ├── landing/           # Public landing page sections
-│   │   │   │   ├── auth/              # Login, MFA, AuthProvider, ProtectedRoute
+│   │   │   │   ├── auth/              # Login, CallbackPage, AuthProvider, ProtectedRoute
 │   │   │   │   └── dashboard/         # Dashboard layout and widgets
 │   │   │   ├── hooks/                 # Custom React hooks
 │   │   │   ├── lib/                   # API client, utilities
@@ -105,9 +105,11 @@ Create a `.env` file in `packages/backend/` with:
 
 ```env
 SECRET_KEY=your-secret-key
-DATABASE_URL=postgresql://user:pass@localhost:5432/agritech
+DATABASE_URL=postgresql://postgres:password@localhost:5432/agritech
 COGNITO_USER_POOL_ID=ap-southeast-1_XXXXXXXXX
 COGNITO_CLIENT_ID=your-cognito-client-id
+COGNITO_DOMAIN=your-app.auth.ap-southeast-1.amazoncognito.com
+COGNITO_REDIRECT_URI=http://localhost:5173/auth/callback
 AWS_REGION=ap-southeast-1
 AWS_ACCESS_KEY_ID=your-access-key
 AWS_SECRET_ACCESS_KEY=your-secret-key
@@ -115,10 +117,13 @@ FRONTEND_URL=http://localhost:5173
 DEBUG=true
 ```
 
-The frontend uses a single optional env var in a `.env` file at `packages/frontend/`:
+The frontend uses env vars in a `.env` file at `packages/frontend/`:
 
 ```env
 VITE_API_URL=http://localhost:8000
+VITE_COGNITO_DOMAIN=your-app.auth.ap-southeast-1.amazoncognito.com
+VITE_COGNITO_CLIENT_ID=your-cognito-client-id
+VITE_COGNITO_REDIRECT_URI=http://localhost:5173/auth/callback
 ```
 
 ## Architecture Overview
@@ -129,7 +134,7 @@ VITE_API_URL=http://localhost:8000
 | ---------------------------- | ------------------ | ------------- |
 | `/`                          | LandingPage        | No            |
 | `/login`                     | LoginPage          | No            |
-| `/mfa`                       | MfaChallenge       | No            |
+| `/auth/callback`             | CallbackPage       | No            |
 | `/dashboard`                 | DashboardLayout    | Yes           |
 | `/dashboard/sensors`         | SensorDataWidget   | Yes           |
 | `/dashboard/alerts`          | AlertsWidget       | Yes           |
@@ -145,9 +150,9 @@ All endpoints are prefixed with `/api`.
 
 | Method | Path                        | Description                          | Auth |
 | ------ | --------------------------- | ------------------------------------ | ---- |
-| POST   | `/api/auth/login`           | Email/password login                 | No   |
-| POST   | `/api/auth/logout`          | Clear auth cookies                   | No   |
-| POST   | `/api/auth/mfa/verify`      | Verify MFA code                      | No   |
+| POST   | `/api/auth/callback`        | Exchange authorization code for tokens | No   |
+| POST   | `/api/auth/logout`          | Clear auth cookies, return Cognito logout URL | No   |
+| GET    | `/api/auth/me`              | Current user profile                 | Yes  |
 | POST   | `/api/auth/token/refresh`   | Refresh access token via cookie      | No   |
 | GET    | `/api/farms/overview`       | Farm overview with aggregated metrics| Yes  |
 | GET    | `/api/farms/sensors`        | Latest sensor readings               | Yes  |
@@ -158,12 +163,13 @@ All endpoints are prefixed with `/api`.
 
 ### Authentication Flow
 
-1. User submits credentials → `POST /api/auth/login`
-2. If MFA required → frontend transitions to `mfa_pending` state → redirects to `/mfa`
-3. User submits MFA code → `POST /api/auth/mfa/verify`
-4. On success → httpOnly cookies set, state becomes `authenticated`
-5. On 3 consecutive MFA failures → account locked via Cognito `AdminDisableUser`
-6. Session expiry → 401 response triggers `session-expired` event → redirect to `/login`
+1. User clicks "Sign in" → frontend generates PKCE params (code_verifier, code_challenge) and a random state, stores them in sessionStorage, and redirects to the Cognito Hosted UI
+2. User authenticates (password, MFA, Google) on the Cognito Hosted UI
+3. Cognito redirects back to `/auth/callback` with an authorization code and state
+4. Frontend validates state, sends code + code_verifier to `POST /api/auth/callback`
+5. Backend exchanges the code at Cognito's `/oauth2/token` endpoint for ID, access, and refresh tokens
+6. Backend validates the ID token via JWKS, sets httpOnly cookies, and returns the user profile
+7. Session expiry → 401 response triggers a single token refresh attempt → if refresh fails, redirect to `/login`
 
 JWT tokens are stored in httpOnly cookies (never in localStorage).
 
@@ -217,7 +223,7 @@ python -m pytest tests/ -v
 ## Deployment
 
 See [docs/DEPLOYMENT.md](DEPLOYMENT.md) for full deployment instructions covering:
-- AWS service setup (Cognito, RDS, S3, IAM) with both Console and CLI steps
-- Coolify Docker Compose deployment
+- AWS service setup (Cognito, S3, IAM) with both Console and CLI steps
+- Coolify PostgreSQL database and Docker Compose deployment
 - Environment variable reference
 - Troubleshooting
