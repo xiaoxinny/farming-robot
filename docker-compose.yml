@@ -8,6 +8,8 @@ services:
         VITE_COGNITO_DOMAIN: ${VITE_COGNITO_DOMAIN}
         VITE_COGNITO_CLIENT_ID: ${VITE_COGNITO_CLIENT_ID}
         VITE_COGNITO_REDIRECT_URI: ${VITE_COGNITO_REDIRECT_URI}
+    ports:
+      - "80"
     restart: unless-stopped
     depends_on:
       backend:
@@ -23,6 +25,8 @@ services:
     build:
       context: .
       dockerfile: packages/backend/Dockerfile
+    ports:
+      - "8000"
     restart: unless-stopped
     environment:
       - SECRET_KEY=${SECRET_KEY}
