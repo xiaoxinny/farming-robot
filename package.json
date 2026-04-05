@@ -4,7 +4,7 @@
   "private": true,
   "description": "AgriTech Platform — farm monitoring and management",
   "workspaces": [
-    "packages/*"
+    "packages/frontend"
   ],
   "scripts": {
     "dev:frontend": "npm run dev --workspace=packages/frontend",

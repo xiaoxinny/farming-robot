@@ -3,12 +3,12 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 
-# Copy root workspace files first for dependency resolution
-COPY package.json package-lock.json* ./
+# Copy root workspace config + lockfile and frontend package.json
+COPY package.json package-lock.json ./
 COPY packages/frontend/package.json packages/frontend/
 
-# Install dependencies (workspace-aware)
-RUN npm ci --workspace=packages/frontend
+# Install only the frontend workspace dependencies
+RUN npm ci --workspace=packages/frontend --include-workspace-root
 
 # Copy frontend source
 COPY packages/frontend/ packages/frontend/
@@ -22,13 +22,9 @@ RUN npm run build --workspace=packages/frontend
 # ── Stage 2: Serve with nginx ────────────────────────────
 FROM nginx:1.27-alpine AS production
 
-# Remove default nginx config
 RUN rm /etc/nginx/conf.d/default.conf
 
-# Copy custom nginx config for SPA routing
 COPY packages/frontend/nginx.conf /etc/nginx/conf.d/default.conf
-
-# Copy built assets from the build stage
 COPY --from=build /app/packages/frontend/dist /usr/share/nginx/html
 
 EXPOSE 80
