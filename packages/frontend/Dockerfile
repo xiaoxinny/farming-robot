@@ -13,9 +13,15 @@ RUN npm ci --workspace=packages/frontend --include-workspace-root
 # Copy frontend source
 COPY packages/frontend/ packages/frontend/
 
-# Build arg for API URL baked into the static bundle
+# Build args baked into the static bundle at compile time
 ARG VITE_API_URL
-ENV VITE_API_URL=${VITE_API_URL}
+ARG VITE_COGNITO_DOMAIN
+ARG VITE_COGNITO_CLIENT_ID
+ARG VITE_COGNITO_REDIRECT_URI
+ENV VITE_API_URL=${VITE_API_URL} \
+    VITE_COGNITO_DOMAIN=${VITE_COGNITO_DOMAIN} \
+    VITE_COGNITO_CLIENT_ID=${VITE_COGNITO_CLIENT_ID} \
+    VITE_COGNITO_REDIRECT_URI=${VITE_COGNITO_REDIRECT_URI}
 
 RUN npm run build --workspace=packages/frontend
 
