@@ -38,13 +38,23 @@ export function generateState(): string {
   return base64urlEncode(bytes);
 }
 
+function getCognitoEnv(): { domain: string; clientId: string; redirectUri: string } {
+  const domain = import.meta.env.VITE_COGNITO_DOMAIN;
+  const clientId = import.meta.env.VITE_COGNITO_CLIENT_ID;
+  const redirectUri = import.meta.env.VITE_COGNITO_REDIRECT_URI;
+  if (!domain || !clientId || !redirectUri) {
+    throw new Error(
+      "Missing required Cognito environment variables: VITE_COGNITO_DOMAIN, VITE_COGNITO_CLIENT_ID, VITE_COGNITO_REDIRECT_URI",
+    );
+  }
+  return { domain, clientId, redirectUri };
+}
+
 /**
  * Build the Cognito authorize URL with all required OIDC parameters.
  */
 export function buildAuthorizeUrl(codeChallenge: string, state: string): string {
-  const domain = import.meta.env.VITE_COGNITO_DOMAIN;
-  const clientId = import.meta.env.VITE_COGNITO_CLIENT_ID;
-  const redirectUri = import.meta.env.VITE_COGNITO_REDIRECT_URI;
+  const { domain, clientId, redirectUri } = getCognitoEnv();
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -63,14 +73,10 @@ export function buildAuthorizeUrl(codeChallenge: string, state: string): string 
  * Build the Cognito logout URL.
  */
 export function buildLogoutUrl(): string {
-  const domain = import.meta.env.VITE_COGNITO_DOMAIN;
-  const clientId = import.meta.env.VITE_COGNITO_CLIENT_ID;
-  const logoutUri = import.meta.env.VITE_COGNITO_REDIRECT_URI ?? window.location.origin;
+  const { domain, clientId, redirectUri } = getCognitoEnv();
+  const logoutUri = redirectUri ?? window.location.origin;
 
-  const params = new URLSearchParams({
-    client_id: clientId,
-    logout_uri: logoutUri,
-  });
+  const params = new URLSearchParams({ client_id: clientId, logout_uri: logoutUri });
 
   return `https://${domain}/logout?${params.toString()}`;
 }

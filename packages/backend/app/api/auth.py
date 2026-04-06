@@ -8,7 +8,6 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.core.deps import get_current_user, get_settings
@@ -164,24 +163,14 @@ async def token_refresh(request: Request, response: Response) -> AuthResponse:
         new_tokens = await refresh_tokens(refresh_tok)
     except (TokenExchangeError, httpx.HTTPError) as exc:
         logger.exception("Token refresh failed")
-        error_response = JSONResponse(
-            status_code=401,
-            content={"detail": "Token refresh failed", "code": "AUTH_ERROR"},
-        )
-        _clear_auth_cookies(error_response)
-        return error_response  # type: ignore[return-value]
+        raise HTTPException(status_code=401, detail="Token refresh failed") from exc
 
     # Parse the new ID token to get user profile
     try:
         profile = parse_id_token_claims(new_tokens["id_token"])
     except Exception as exc:
         logger.exception("ID token validation failed after refresh")
-        error_response = JSONResponse(
-            status_code=401,
-            content={"detail": "Token refresh failed", "code": "AUTH_ERROR"},
-        )
-        _clear_auth_cookies(error_response)
-        return error_response  # type: ignore[return-value]
+        raise HTTPException(status_code=401, detail="Token refresh failed") from exc
 
     # Update the access token cookie
     response.set_cookie(

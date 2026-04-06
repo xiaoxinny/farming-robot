@@ -1,4 +1,7 @@
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const BASE_URL: string = import.meta.env.VITE_API_URL;
+if (!BASE_URL) {
+  throw new Error("VITE_API_URL is not set — add it to .env.local for development or as a build arg for production");
+}
 
 /** Custom event dispatched when a 401 response is received, signaling session expiry. */
 export const SESSION_EXPIRED_EVENT = "session-expired";
