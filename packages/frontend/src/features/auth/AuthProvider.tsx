@@ -79,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     queryFn: async () => {
       setSuppressSessionExpired(true);
       try {
-        const data = await api.post<{ user: User }>("/auth/token/refresh");
+        const data = await api.post<{ user: User }>("/api/auth/token/refresh");
         setAuthState({ status: "authenticated", user: data.user });
         return data;
       } finally {
@@ -118,7 +118,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const handleCallback = useCallback(
     async (code: string, codeVerifier: string) => {
-      const data = await api.post<{ user: User }>("/auth/callback", {
+      const data = await api.post<{ user: User }>("/api/auth/callback", {
         code,
         code_verifier: codeVerifier,
       });
@@ -128,7 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    const data = await api.post<{ logout_url: string }>("/auth/logout");
+    const data = await api.post<{ logout_url: string }>("/api/auth/logout");
     setAuthState({ status: "unauthenticated", user: null });
     queryClient.clear();
     window.location.href = data.logout_url;
