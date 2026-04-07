@@ -15,6 +15,24 @@ export function IsaacSimViewport({ connectionStatus, streamUrl }: IsaacSimViewpo
 
   const isConnected = connectionStatus === "connected";
 
+  // Build a safe stream URL with an encoded quality query parameter
+  const resolvedStreamUrl = (() => {
+    if (!isConnected || !streamUrl) {
+      return "";
+    }
+    try {
+      const url =
+        streamUrl.startsWith("http://") || streamUrl.startsWith("https://")
+          ? new URL(streamUrl)
+          : new URL(streamUrl, window.location.origin);
+      url.searchParams.set("quality", quality);
+      return url.toString();
+    } catch {
+      // If the URL is invalid, fall back to the original string without modification
+      return streamUrl;
+    }
+  })();
+
   return (
     <div className="rounded-lg border bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
@@ -23,7 +41,12 @@ export function IsaacSimViewport({ connectionStatus, streamUrl }: IsaacSimViewpo
           <div className="flex items-center gap-3">
             <select
               value={quality}
-              onChange={(e) => setQuality(e.target.value as typeof quality)}
+              onChange={(e) => {
+                const value = e.target.value;
+                if (QUALITY_OPTIONS.includes(value as (typeof QUALITY_OPTIONS)[number])) {
+                  setQuality(value as (typeof QUALITY_OPTIONS)[number]);
+                }
+              }}
               className="rounded-md border border-gray-300 px-2 py-1 text-xs focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
               aria-label="Stream quality"
             >
@@ -47,7 +70,7 @@ export function IsaacSimViewport({ connectionStatus, streamUrl }: IsaacSimViewpo
       <div className={`relative overflow-hidden rounded-lg bg-gray-900 ${isFullscreen ? "fixed inset-0 z-50" : "aspect-video"}`}>
         {isConnected && streamUrl ? (
           <iframe
-            src={`${streamUrl}${streamUrl.includes("?") ? "&" : "?"}quality=${quality}`}
+            src={resolvedStreamUrl}
             title="Isaac Sim Viewport"
             className="h-full w-full border-0"
             allow="fullscreen"
