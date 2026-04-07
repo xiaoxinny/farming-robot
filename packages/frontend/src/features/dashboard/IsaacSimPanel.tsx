@@ -134,7 +134,10 @@ export function IsaacSimPanel() {
               id="isaac-stream"
               type="text"
               value={config.streamUrl}
-              onChange={(e) => setConfig((c) => ({ ...c, streamUrl: e.target.value }))}
+              onChange={(e) => {
+                const value = e.target.value.trim();
+                setConfig((c) => ({ ...c, streamUrl: value }));
+              }}
               placeholder="e.g. http://192.168.1.100:8211/stream"
               className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-green-500 focus:outline-none focus:ring-1 focus:ring-green-500"
             />
