@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import math
+import random
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from app.core.deps import get_current_user
@@ -99,6 +101,146 @@ class AlertsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Time-series models
+# ---------------------------------------------------------------------------
+
+
+class TimeSeriesPoint(BaseModel):
+    """A single time-series data point."""
+
+    timestamp: datetime
+    value: float
+
+
+class SensorTimeSeries(BaseModel):
+    """Time-series data for one sensor type."""
+
+    sensor_type: SensorType
+    unit: str
+    points: list[TimeSeriesPoint]
+
+
+class TimeSeriesResponse(BaseModel):
+    """Response wrapper for sensor time-series data."""
+
+    data: list[SensorTimeSeries]
+
+
+# ---------------------------------------------------------------------------
+# Trend models
+# ---------------------------------------------------------------------------
+
+
+class TrendPoint(BaseModel):
+    """A single trend data point."""
+
+    hour: str
+    value: float
+
+
+class MetricTrend(BaseModel):
+    """Trend data for one metric."""
+
+    metric: str
+    unit: str
+    current_value: float
+    points: list[TrendPoint]
+
+
+class TrendsResponse(BaseModel):
+    """Response wrapper for trends data."""
+
+    data: list[MetricTrend]
+
+
+# ---------------------------------------------------------------------------
+# Mock data generators
+# ---------------------------------------------------------------------------
+
+# Realistic sensor ranges
+_SENSOR_RANGES: dict[SensorType, tuple[float, float, str]] = {
+    SensorType.temperature: (20.0, 35.0, "°C"),
+    SensorType.humidity: (50.0, 90.0, "%"),
+    SensorType.soil_moisture: (30.0, 70.0, "%"),
+    SensorType.light: (200.0, 1000.0, "lux"),
+}
+
+
+def _generate_timeseries(
+    sensor_type: SensorType,
+    hours: int,
+    base_time: datetime,
+) -> SensorTimeSeries:
+    """Generate mock time-series data for a sensor type.
+
+    Produces one point every 30 minutes for the given number of hours,
+    with values within realistic agricultural ranges. A sine wave with
+    random noise creates natural-looking variation.
+    """
+    low, high, unit = _SENSOR_RANGES[sensor_type]
+    mid = (low + high) / 2.0
+    amplitude = (high - low) / 2.0
+    num_points = hours * 2  # 30-min intervals
+    rng = random.Random(42 + hash(sensor_type))  # deterministic per type
+
+    points: list[TimeSeriesPoint] = []
+    start = base_time - timedelta(hours=hours)
+    for i in range(num_points):
+        ts = start + timedelta(minutes=30 * i)
+        # Sine wave for diurnal pattern + small noise
+        phase = (i / num_points) * 2 * math.pi
+        noise = rng.uniform(-0.05, 0.05) * amplitude
+        value = mid + amplitude * 0.6 * math.sin(phase) + noise
+        # Clamp to range
+        value = max(low, min(high, round(value, 1)))
+        points.append(TimeSeriesPoint(timestamp=ts, value=value))
+
+    return SensorTimeSeries(sensor_type=sensor_type, unit=unit, points=points)
+
+
+def _generate_trends(base_time: datetime) -> list[MetricTrend]:
+    """Generate 12 hourly trend points for each metric.
+
+    Returns trend data for temperature, humidity, soil_moisture, and
+    active_alerts suitable for sparkline rendering.
+    """
+    rng = random.Random(99)
+    metrics: list[MetricTrend] = []
+
+    metric_configs: list[tuple[str, str, float, float, float]] = [
+        ("temperature", "°C", 20.0, 35.0, 28.5),
+        ("humidity", "%", 50.0, 90.0, 72.3),
+        ("soil_moisture", "%", 30.0, 70.0, 45.1),
+        ("active_alerts", "count", 0.0, 10.0, 2.0),
+    ]
+
+    for metric_name, unit, low, high, current in metric_configs:
+        points: list[TrendPoint] = []
+        mid = (low + high) / 2.0
+        amplitude = (high - low) / 2.0
+
+        for i in range(12):
+            hour_dt = base_time - timedelta(hours=11 - i)
+            hour_label = hour_dt.strftime("%H:%M")
+            phase = (i / 12) * 2 * math.pi
+            noise = rng.uniform(-0.05, 0.05) * amplitude
+            value = mid + amplitude * 0.4 * math.sin(phase) + noise
+            value = max(low, min(high, round(value, 1)))
+            points.append(TrendPoint(hour=hour_label, value=value))
+
+        metrics.append(
+            MetricTrend(
+                metric=metric_name,
+                unit=unit,
+                current_value=current,
+                points=points,
+            )
+        )
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
 # Mock data
 # ---------------------------------------------------------------------------
 
@@ -148,26 +290,92 @@ _MOCK_SENSORS: list[SensorReading] = [
     ),
 ]
 
+_SEVERITY_ORDER: dict[AlertSeverity, int] = {
+    AlertSeverity.critical: 0,
+    AlertSeverity.warning: 1,
+    AlertSeverity.info: 2,
+}
+
+
+def sort_alerts_by_severity(
+    alerts: list[Alert],
+) -> list[Alert]:
+    """Sort alerts by severity: critical → warning → info."""
+    return sorted(
+        alerts,
+        key=lambda a: _SEVERITY_ORDER[a.severity],
+    )
+
+
 _MOCK_ALERTS: list[Alert] = [
     Alert(
         alert_id="alert-001",
         severity=AlertSeverity.warning,
         message="Soil moisture below optimal threshold in Zone B",
-        timestamp=_NOW,
+        timestamp=_NOW - timedelta(minutes=45),
         acknowledged=False,
     ),
     Alert(
         alert_id="alert-002",
         severity=AlertSeverity.critical,
         message="Temperature spike detected in Greenhouse 3",
-        timestamp=_NOW,
+        timestamp=_NOW - timedelta(minutes=10),
         acknowledged=False,
     ),
     Alert(
         alert_id="alert-003",
         severity=AlertSeverity.info,
         message="Scheduled irrigation completed for Zone A",
-        timestamp=_NOW,
+        timestamp=_NOW - timedelta(hours=2),
+        acknowledged=True,
+    ),
+    Alert(
+        alert_id="alert-004",
+        severity=AlertSeverity.critical,
+        message="Pest infestation detected in Zone D — aphids",
+        timestamp=_NOW - timedelta(minutes=5),
+        acknowledged=False,
+    ),
+    Alert(
+        alert_id="alert-005",
+        severity=AlertSeverity.critical,
+        message="Irrigation pump failure on Circuit 2",
+        timestamp=_NOW - timedelta(minutes=20),
+        acknowledged=False,
+    ),
+    Alert(
+        alert_id="alert-006",
+        severity=AlertSeverity.warning,
+        message="Soil nitrogen levels low in Zone C",
+        timestamp=_NOW - timedelta(hours=1),
+        acknowledged=False,
+    ),
+    Alert(
+        alert_id="alert-007",
+        severity=AlertSeverity.warning,
+        message="Harvester R-03 requires maintenance",
+        timestamp=_NOW - timedelta(minutes=30),
+        acknowledged=False,
+    ),
+    Alert(
+        alert_id="alert-008",
+        severity=AlertSeverity.info,
+        message="Weather advisory: heavy rain expected tomorrow",
+        timestamp=_NOW - timedelta(hours=3),
+        acknowledged=True,
+    ),
+    Alert(
+        alert_id="alert-009",
+        severity=AlertSeverity.warning,
+        message="High humidity may promote fungal growth in Zone A",
+        timestamp=_NOW - timedelta(minutes=55),
+        acknowledged=False,
+    ),
+    Alert(
+        alert_id="alert-010",
+        severity=AlertSeverity.info,
+        message="Drone D-02 patrol completed — no anomalies",
+        timestamp=_NOW - timedelta(hours=1, minutes=30),
         acknowledged=True,
     ),
 ]
@@ -199,4 +407,26 @@ async def get_alerts(
     current_user: dict[str, Any] = Depends(get_current_user),
 ) -> AlertsResponse:
     """Return active farm alerts ordered by severity."""
-    return AlertsResponse(data=_MOCK_ALERTS)
+    return AlertsResponse(
+        data=sort_alerts_by_severity(_MOCK_ALERTS),
+    )
+
+
+@router.get("/sensors/timeseries", response_model=TimeSeriesResponse)
+async def get_sensor_timeseries(
+    sensor_type: SensorType | None = Query(default=None, description="Filter by sensor type"),
+    hours: int = Query(default=24, ge=1, le=168, description="Number of hours of data"),
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> TimeSeriesResponse:
+    """Return time-series sensor data at 30-minute intervals."""
+    types = [sensor_type] if sensor_type else list(SensorType)
+    series = [_generate_timeseries(st, hours, _NOW) for st in types]
+    return TimeSeriesResponse(data=series)
+
+
+@router.get("/trends", response_model=TrendsResponse)
+async def get_trends(
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> TrendsResponse:
+    """Return sparkline trend data for dashboard metric cards."""
+    return TrendsResponse(data=_generate_trends(_NOW))

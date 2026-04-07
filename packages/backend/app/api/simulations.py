@@ -9,6 +9,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from app.api.robots import RobotType
 from app.core.deps import get_current_user
 
 router = APIRouter(prefix="/simulations", tags=["simulations"])
@@ -47,6 +48,22 @@ class SimulationListResponse(BaseModel):
     """Response wrapper for listing simulations."""
 
     data: list[SimulationMetadata]
+
+
+class SimulationScenario(BaseModel):
+    """A predefined Isaac Sim simulation scenario."""
+
+    scenario_id: str
+    name: str
+    description: str
+    robot_type: RobotType
+    estimated_duration_minutes: int
+
+
+class ScenariosResponse(BaseModel):
+    """Response wrapper for simulation scenarios."""
+
+    data: list[SimulationScenario]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +113,38 @@ def _generate_mock_signed_url(simulation_id: str, media_type: MediaType) -> str:
     )
 
 
+_MOCK_SCENARIOS: list[SimulationScenario] = [
+    SimulationScenario(
+        scenario_id="scenario-001",
+        name="Crop Inspection Drone",
+        description="Automated drone flight over crop fields capturing multispectral imagery for health assessment and early disease detection.",
+        robot_type=RobotType.drone,
+        estimated_duration_minutes=15,
+    ),
+    SimulationScenario(
+        scenario_id="scenario-002",
+        name="Autonomous Harvester Path",
+        description="Path planning and navigation simulation for an autonomous harvester operating across multiple crop rows.",
+        robot_type=RobotType.harvester,
+        estimated_duration_minutes=30,
+    ),
+    SimulationScenario(
+        scenario_id="scenario-003",
+        name="Pest Patrol Rover",
+        description="Ground rover patrol route simulation for detecting and mapping pest infestations using onboard sensors.",
+        robot_type=RobotType.ground_rover,
+        estimated_duration_minutes=20,
+    ),
+    SimulationScenario(
+        scenario_id="scenario-004",
+        name="Irrigation Monitoring Drone",
+        description="Drone survey simulation for monitoring irrigation coverage and identifying dry spots using thermal imaging.",
+        robot_type=RobotType.drone,
+        estimated_duration_minutes=25,
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -107,6 +156,14 @@ async def list_simulations(
 ) -> SimulationListResponse:
     """Return a list of available simulations."""
     return SimulationListResponse(data=list(_MOCK_SIMULATIONS.values()))
+
+
+@router.get("/scenarios", response_model=ScenariosResponse)
+async def get_simulation_scenarios(
+    current_user: dict[str, Any] = Depends(get_current_user),
+) -> ScenariosResponse:
+    """Return predefined Isaac Sim simulation scenarios."""
+    return ScenariosResponse(data=_MOCK_SCENARIOS)
 
 
 @router.get("/{simulation_id}", response_model=SimulationResponse)

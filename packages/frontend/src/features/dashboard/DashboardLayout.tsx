@@ -7,6 +7,10 @@ import {
   Bell,
   BarChart3,
   FlaskConical,
+  Cloud,
+  Leaf,
+  Monitor,
+  Bot,
   LogOut,
   Menu,
 } from "lucide-react";
@@ -16,6 +20,10 @@ const navItems = [
   { label: "Sensors", to: "/dashboard/sensors", icon: Radio },
   { label: "Alerts", to: "/dashboard/alerts", icon: Bell },
   { label: "Analytics", to: "/dashboard/analytics", icon: BarChart3 },
+  { label: "Weather", to: "/dashboard/weather", icon: Cloud },
+  { label: "Crop Health", to: "/dashboard/crop-health", icon: Leaf },
+  { label: "Robot Fleet", to: "/dashboard/robot-fleet", icon: Bot },
+  { label: "Isaac Sim", to: "/dashboard/isaac-sim", icon: Monitor },
   { label: "Simulations", to: "/dashboard/simulations", icon: FlaskConical },
 ] as const;
 

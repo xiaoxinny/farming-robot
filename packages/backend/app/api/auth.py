@@ -140,10 +140,15 @@ async def callback(body: CallbackRequest, response: Response) -> AuthResponse:
         ) from exc
 
     try:
-        profile = parse_id_token_claims(tokens["id_token"], access_token=tokens["access_token"])
+        profile = parse_id_token_claims(
+            tokens["id_token"],
+            access_token=tokens["access_token"],
+        )
     except Exception as exc:
         logger.exception("ID token validation failed")
-        raise HTTPException(status_code=401, detail="Invalid ID token") from exc
+        raise HTTPException(
+            status_code=401, detail="Invalid ID token",
+        ) from exc
 
     _set_auth_cookies(response, tokens)
 
@@ -167,14 +172,23 @@ async def token_refresh(request: Request, response: Response) -> AuthResponse:
         new_tokens = await refresh_tokens(refresh_tok)
     except (TokenExchangeError, httpx.HTTPError) as exc:
         logger.exception("Token refresh failed")
-        raise HTTPException(status_code=401, detail="Token refresh failed") from exc
+        raise HTTPException(
+            status_code=401, detail="Token refresh failed",
+        ) from exc
 
     # Parse the new ID token to get user profile
     try:
-        profile = parse_id_token_claims(new_tokens["id_token"], access_token=new_tokens["access_token"])
+        profile = parse_id_token_claims(
+            new_tokens["id_token"],
+            access_token=new_tokens["access_token"],
+        )
     except Exception as exc:
-        logger.exception("ID token validation failed after refresh")
-        raise HTTPException(status_code=401, detail="Token refresh failed") from exc
+        logger.exception(
+            "ID token validation failed after refresh",
+        )
+        raise HTTPException(
+            status_code=401, detail="Token refresh failed",
+        ) from exc
 
     # Update the access token cookie
     response.set_cookie(
@@ -194,7 +208,10 @@ async def token_refresh(request: Request, response: Response) -> AuthResponse:
 
 
 @router.post("/logout", response_model=LogoutResponse)
-async def logout(response: Response, settings=Depends(get_settings)) -> LogoutResponse:
+async def logout(
+    response: Response,
+    settings=Depends(get_settings),
+) -> LogoutResponse:
     """Clear authentication cookies and return the Cognito logout URL."""
     _clear_auth_cookies(response)
 
@@ -208,7 +225,9 @@ async def logout(response: Response, settings=Depends(get_settings)) -> LogoutRe
 
 
 @router.get("/me", response_model=AuthResponse)
-async def me(claims: dict[str, Any] = Depends(get_current_user)) -> AuthResponse:
+async def me(
+    claims: dict[str, Any] = Depends(get_current_user),
+) -> AuthResponse:
     """Return the current user's profile from the JWT claims."""
     return AuthResponse(
         user=UserProfile(

@@ -52,7 +52,10 @@ export function AlertsWidget() {
     );
   }
 
-  const alerts = data?.data ?? [];
+  const SEVERITY_ORDER: Record<string, number> = { critical: 0, warning: 1, info: 2 };
+  const alerts = [...(data?.data ?? [])].sort(
+    (a, b) => (SEVERITY_ORDER[a.severity] ?? 3) - (SEVERITY_ORDER[b.severity] ?? 3),
+  );
 
   return (
     <div className="space-y-4">

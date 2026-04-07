@@ -30,15 +30,18 @@ def _jwks_url(settings: Settings) -> str:
     )
 
 
-def _get_jwks(settings: Settings, *, force_refresh: bool = False) -> dict[str, Any]:
+def _get_jwks(
+    settings: Settings, *, force_refresh: bool = False,
+) -> dict[str, Any]:
     """Return cached JWKS keys, refreshing if stale or forced."""
     global _jwks_cache  # noqa: PLW0603
 
     if not force_refresh:
         with _jwks_lock:
+            fetched = _jwks_cache.get("fetched_at", 0)
             if (
                 _jwks_cache.get("keys")
-                and time.time() - _jwks_cache.get("fetched_at", 0) < _JWKS_TTL_SECONDS
+                and time.time() - fetched < _JWKS_TTL_SECONDS
             ):
                 return _jwks_cache
 
@@ -95,7 +98,8 @@ def validate_token(
     public_key = jwk.construct(key_data)
 
     issuer = (
-        f"https://cognito-idp.{settings.AWS_REGION}.amazonaws.com/{settings.COGNITO_USER_POOL_ID}"
+        f"https://cognito-idp.{settings.AWS_REGION}"
+        f".amazonaws.com/{settings.COGNITO_USER_POOL_ID}"
     )
 
     claims = jwt.decode(
@@ -152,8 +156,14 @@ async def exchange_code_for_tokens(
         )
 
     if resp.status_code != 200:
-        logger.error("Token exchange failed with status %s", resp.status_code)
-        raise TokenExchangeError(f"Token exchange failed with status {resp.status_code}")
+        logger.error(
+            "Token exchange failed with status %s",
+            resp.status_code,
+        )
+        raise TokenExchangeError(
+            f"Token exchange failed with status "
+            f"{resp.status_code}"
+        )
 
     return resp.json()
 
@@ -188,8 +198,14 @@ async def refresh_tokens(
         )
 
     if resp.status_code != 200:
-        logger.error("Token refresh failed with status %s", resp.status_code)
-        raise TokenExchangeError(f"Token refresh failed with status {resp.status_code}")
+        logger.error(
+            "Token refresh failed with status %s",
+            resp.status_code,
+        )
+        raise TokenExchangeError(
+            f"Token refresh failed with status "
+            f"{resp.status_code}"
+        )
 
     return resp.json()
 

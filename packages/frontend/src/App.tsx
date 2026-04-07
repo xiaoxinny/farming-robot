@@ -7,10 +7,14 @@ import { LoginPage } from "@/features/auth/LoginPage";
 import { CallbackPage } from "@/features/auth/CallbackPage";
 import { ProtectedRoute } from "@/features/auth/ProtectedRoute";
 import { DashboardLayout } from "@/features/dashboard/DashboardLayout";
-import { MetricsOverview } from "@/features/dashboard/MetricsOverview";
+import { DashboardOverview } from "@/features/dashboard/DashboardOverview";
 import { SensorDataWidget } from "@/features/dashboard/SensorDataWidget";
 import { AlertsWidget } from "@/features/dashboard/AlertsWidget";
-import { AnalyticsWidget } from "@/features/dashboard/AnalyticsWidget";
+import { SensorTimeSeriesChart } from "@/features/dashboard/SensorTimeSeriesChart";
+import { WeatherWidget } from "@/features/dashboard/WeatherWidget";
+import { CropHealthWidget } from "@/features/dashboard/CropHealthWidget";
+import { RobotFleetWidget } from "@/features/dashboard/RobotFleetWidget";
+import { IsaacSimPanel } from "@/features/dashboard/IsaacSimPanel";
 import { SimulationList } from "@/features/dashboard/SimulationList";
 
 const LazySimulationViewer = lazy(() =>
@@ -50,10 +54,14 @@ function App() {
                 </ProtectedRoute>
               }
             >
-              <Route index element={<MetricsOverview />} />
+              <Route index element={<DashboardOverview />} />
               <Route path="sensors" element={<SensorDataWidget />} />
               <Route path="alerts" element={<AlertsWidget />} />
-              <Route path="analytics" element={<AnalyticsWidget />} />
+              <Route path="analytics" element={<SensorTimeSeriesChart />} />
+              <Route path="weather" element={<WeatherWidget />} />
+              <Route path="crop-health" element={<CropHealthWidget />} />
+              <Route path="robot-fleet" element={<RobotFleetWidget />} />
+              <Route path="isaac-sim" element={<IsaacSimPanel />} />
               <Route path="simulations" element={<SimulationList />} />
               <Route
                 path="simulations/:id"
